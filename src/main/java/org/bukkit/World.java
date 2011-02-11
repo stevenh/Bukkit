@@ -319,6 +319,24 @@ public interface World {
     public Environment getEnvironment();
 
     /**
+     * Checks if the given block is empty.
+     * A block is considered empty if its type == Material.AIR
+     *
+     * @param x The X-coordinate to check
+     * @param y The Y-coordinate to check
+     * @param z The Z-coordinate to check
+     * @return true if the block is empty
+     */
+    public boolean isEmpty(int x, int y, int z);
+
+    /**
+     * Gets the chunk generator for this world
+     *
+     * @return ChunkGenerator associated with this world
+     */
+    public ChunkGenerator getGenerator();
+
+    /**
      * Represents various map environment types that a world may be
      */
     public enum Environment {
