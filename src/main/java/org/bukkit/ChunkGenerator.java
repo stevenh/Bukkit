@@ -11,7 +11,7 @@ public interface ChunkGenerator {
     /**
      * Shapes the chunk for the given coordinates.<br />
      * <br />
-     * This method should return a MaterialData[32768] in the following format:
+     * This method should return a byte[32768] in the following format:
      * <pre>
      * for (int x = 0; x < 16; x++) {
      *     for (int z = 0; z < 16; z++) {
@@ -28,8 +28,7 @@ public interface ChunkGenerator {
      * @param random The random generator to use
      * @param x The X-coordinate of the chunk
      * @param z The Z-coordinate of the chunk
-     * @return MaterialData[] containing the types and data for each block
-     * shaped by this generator
+     * @return byte[] containing the types for each block created by this generator
      */
-    public MaterialData[] generate(Random random, int x, int z);
+    public byte[] generate(Random random, int x, int z);
 }
