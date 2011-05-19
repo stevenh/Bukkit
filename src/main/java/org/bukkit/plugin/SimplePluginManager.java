@@ -94,57 +94,80 @@ public final class SimplePluginManager implements PluginManager {
      */
     public Plugin[] loadPlugins(File directory) {
         List<Plugin> result = new ArrayList<Plugin>();
-        File[] files = directory.listFiles();
 
-        boolean allFailed = false;
-        boolean finalPass = false;
-
-        LinkedList<File> filesList = new LinkedList(Arrays.asList(files));
-
-        if (!(server.getUpdateFolder().equals(""))) {
+        if (!server.getUpdateFolder().equals("")) {
             updateDirectory = new File(directory, server.getUpdateFolder());
         }
 
-        while (!allFailed || finalPass) {
-            allFailed = true;
-            Iterator<File> itr = filesList.iterator();
-
-            while (itr.hasNext()) {
-                File file = itr.next();
-                Plugin plugin = null;
-
-                try {
-                    plugin = loadPlugin(file, finalPass);
-                    itr.remove();
-                } catch (UnknownDependencyException ex) {
-                    if (finalPass) {
+        PluginSorter pluginSorter = new PluginSorter(directory);
+        for (File file : directory.listFiles()) {
+            if (file.isFile()) {
+                updatePlugin(file); // Ensure its up to date first as this may change dependencies
+                PluginLoader pluginLoader = pluginLoader(file);
+                if (null != pluginLoader) {
+                    try {
+                        pluginSorter.addPlugin(pluginLoader.getPluginDescription(file), file);
+                    } catch (InvalidPluginException ex) {
+                        server.getLogger().log(Level.SEVERE, "Could not load '" + file.getPath() + "' in folder '" + directory.getPath() + "': ", ex.getCause());
+                    } catch (InvalidDescriptionException ex) {
                         server.getLogger().log(Level.SEVERE, "Could not load '" + file.getPath() + "' in folder '" + directory.getPath() + "': " + ex.getMessage(), ex);
-                        itr.remove();
-                    } else {
-                        plugin = null;
                     }
+                }
+            }
+        }
+
+        try {
+            for (PluginNode pluginVertex : pluginSorter.orderedPlugins()) {
+                Plugin plugin = null;
+                File file = pluginVertex.getFile();
+                String pluginName = pluginVertex.getName();
+                try {
+                    // Note: We rely on loadPlugin rechecking dependencies to ensure plugins that depend
+                    // on previously failed load plugins give the right error
+                    plugin = loadPlugin(file, false);
+                } catch (UnknownDependencyException ex) {
+                    server.getLogger().log(Level.SEVERE, "Failed to load plugin '" + pluginVertex.getName() + "' from '" + file.getPath() + "' in folder '" + directory.getPath() + "': " + ex.getMessage(), ex);
                 } catch (InvalidPluginException ex) {
-                    server.getLogger().log(Level.SEVERE, "Could not load '" + file.getPath() + "' in folder '" + directory.getPath() + "': ", ex.getCause());
-                    itr.remove();
+                    server.getLogger().log(Level.SEVERE, "Failed to load plugin '" + pluginVertex.getName() + "' from '" + file.getPath() + "' in folder '" + directory.getPath() + "': ", ex.getCause());
                 } catch (InvalidDescriptionException ex) {
-                    server.getLogger().log(Level.SEVERE, "Could not load '" + file.getPath() + "' in folder '" + directory.getPath() + "': " + ex.getMessage(), ex);
-                    itr.remove();
+                    server.getLogger().log(Level.SEVERE, "Failed to load plugin '" + pluginVertex.getName() + "' from '" + file.getPath() + "' in folder '" + directory.getPath() + "': " + ex.getMessage(), ex);
                 }
 
                 if (plugin != null) {
                     result.add(plugin);
-                    allFailed = false;
-                    finalPass = false;
                 }
             }
-            if (finalPass) {
-                break;
-            } else if (allFailed) {
-                finalPass = true;
-            }
+        } catch (CyclicDependencyException e) {
+            server.getLogger().log(Level.SEVERE, "Could not load plugins in folder '" + directory.getPath() + "': " + e.getMessage(), e);
         }
 
         return result.toArray(new Plugin[result.size()]);
+    }
+
+    private PluginLoader pluginLoader(File file) {
+        for (Pattern filter : fileAssociations.keySet()) {
+            String name = file.getName();
+            Matcher match = filter.matcher(name);
+
+            if (match.find()) {
+                return fileAssociations.get(filter);
+            }
+        }
+
+        return null;
+    }
+
+    private boolean updatePlugin(File file) {
+        File updateFile = null;
+
+        if (file.isFile() && updateDirectory != null && updateDirectory.isDirectory() && (updateFile = new File(updateDirectory, file.getName())).isFile()) {
+            if (FileUtil.copy(updateFile, file)) {
+                updateFile.delete();
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -157,7 +180,7 @@ public final class SimplePluginManager implements PluginManager {
      * @throws InvalidPluginException Thrown when the specified file is not a valid plugin
      * @throws InvalidDescriptionException Thrown when the specified file contains an invalid description
      */
-    public synchronized Plugin loadPlugin(File file) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
+    public Plugin loadPlugin(File file) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
         return loadPlugin(file, true);
     }
 
@@ -167,34 +190,37 @@ public final class SimplePluginManager implements PluginManager {
      * File must be valid according to the current enabled Plugin interfaces
      *
      * @param file File containing the plugin to load
-     * @param ignoreSoftDependencies Loader will ignore soft dependencies if this flag is set to true
+     * @param updatePlugin plugin update will be applied before loading if one is available
      * @return The Plugin loaded, or null if it was invalid
      * @throws InvalidPluginException Thrown when the specified file is not a valid plugin
      * @throws InvalidDescriptionException Thrown when the specified file contains an invalid description
      */
-    public synchronized Plugin loadPlugin(File file, boolean ignoreSoftDependencies) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
-        File updateFile = null;
+    private synchronized Plugin loadPlugin(File file, boolean updatePlugin) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
+        if (updatePlugin) {
+            updatePlugin(file);
+        }
 
-        if (updateDirectory != null && updateDirectory.isDirectory() && (updateFile = new File(updateDirectory, file.getName())).isFile()) {
-            if (FileUtil.copy(updateFile, file)) {
-                updateFile.delete();
+        PluginLoader pluginLoader = pluginLoader(file);
+        if (null == pluginLoader) {
+            return null;
+        }
+
+        PluginDescriptionFile description = pluginLoader.getPluginDescription(file);
+        for (String dependencyName : description.getDepend()) {
+            Plugin dependency = getPlugin(dependencyName);
+            if (null == dependency) {
+                // Missing dependency
+                throw new UnknownDependencyException(dependencyName);
+
+            } else if (!dependency.isEnabled()) {
+                // Enable the dependency plugin and all its dependencies
+                if (!enablePlugin(dependency, true)) {
+                    return null; // Dependency failed to load
+                }
             }
         }
 
-        Set<Pattern> filters = fileAssociations.keySet();
-        Plugin result = null;
-
-        for (Pattern filter : filters) {
-            String name = file.getName();
-            Matcher match = filter.matcher(name);
-
-            if (match.find()) {
-                PluginLoader loader = fileAssociations.get(filter);
-
-                result = loader.loadPlugin(file, ignoreSoftDependencies);
-            }
-        }
-
+        Plugin result = pluginLoader.loadPlugin(file);
         if (result != null) {
             plugins.add(result);
             lookupNames.put(result.getDescription().getName(), result);
@@ -248,23 +274,50 @@ public final class SimplePluginManager implements PluginManager {
     }
 
     public void enablePlugin(final Plugin plugin) {
+        enablePlugin(plugin, true);
+    }
+
+    private boolean enablePlugin(final Plugin plugin, boolean followDependencies) {
         if (!plugin.isEnabled()) {
+            if (followDependencies) {
+                for (String dependencyName : plugin.getDescription().getDepend()) {
+                    Plugin dependency = getPlugin(dependencyName);
+                    if (null == dependency ||!enablePlugin(dependency, true)) {
+                        // Failed to enable an dependency plugin abort
+                        return false;
+                    }
+                }
+            }
+
             try {
                 plugin.getPluginLoader().enablePlugin(plugin);
             } catch (Throwable ex) {
                 server.getLogger().log(Level.SEVERE, "Error occurred (in the plugin loader) while enabling " + plugin.getDescription().getFullName() + " (Is it up to date?): " + ex.getMessage(), ex);
+                return false;
             }
         }
+
+        return true;
     }
 
     public void disablePlugins() {
         for (Plugin plugin: getPlugins()) {
-            disablePlugin(plugin);
+            disablePlugin(plugin, false);
         }
     }
 
     public void disablePlugin(final Plugin plugin) {
+        disablePlugin(plugin, true);
+    }
+
+    private void disablePlugin(final Plugin plugin, boolean followDependencies) {
         if (plugin.isEnabled()) {
+            if (followDependencies) {
+                for (Plugin dependency : pluginDependents(plugin)) {
+                    disablePlugin(dependency, true);
+                }
+            }
+
             try {
                 plugin.getPluginLoader().disablePlugin(plugin);
             } catch (Throwable ex) {
@@ -275,6 +328,18 @@ public final class SimplePluginManager implements PluginManager {
             server.getScheduler().cancelTasks(plugin);
             server.getServicesManager().unregisterAll(plugin);
         }
+    }
+
+    private List<Plugin> pluginDependents(Plugin plugin) {
+        String pluginName = plugin.getDescription().getName();
+        List<Plugin> dependents = new ArrayList<Plugin>();
+        for (Plugin potentialDependent : plugins) {
+            if (potentialDependent.getDescription().getDepend().contains(pluginName)) {
+                dependents.add(plugin);
+            }
+        }
+
+        return dependents;
     }
 
     public void clearPlugins() {
@@ -374,5 +439,165 @@ public final class SimplePluginManager implements PluginManager {
         eventListeners = new TreeSet<RegisteredListener>(comparer);
         listeners.put(type, eventListeners);
         return eventListeners;
+    }
+
+    private class PluginNode {
+        private final PluginDescriptionFile description;
+        private final File file;
+        private final int initialIndex;
+
+        public PluginNode(PluginDescriptionFile description, File file, int initialIndex) {
+            this.description = description;
+            this.file = file;
+            this.initialIndex = initialIndex;
+        }
+
+        public File getFile() {
+            return file;
+        }
+
+        public int getInitialIndex() {
+            return initialIndex;
+        }
+
+        public List<String> getDepend() {
+            return description.getDepend();
+        }
+
+        public List<String> getSoftDepend() {
+            return description.getSoftDepend();
+        }
+
+        public String getName() {
+            return description.getName();
+        }
+
+        public String toString() {
+            return getName();
+        }
+    }
+
+    private class PluginSorter {
+        private ArrayList<PluginNode> pluginList;
+        private HashMap<String,PluginNode> pluginHash;
+        private PluginNode sortedPlugins[];
+        private int matrix[][];
+        private int numPlugins;
+        private final File directory;
+
+        public PluginSorter(File directory) {
+            this.directory = directory;
+            pluginList = new ArrayList<PluginNode>();
+            pluginHash = new HashMap<String,PluginNode>();
+        }
+
+        public PluginNode addPlugin(PluginDescriptionFile description, File file) {
+            PluginNode plugin = new PluginNode(description, file, pluginList.size());
+            pluginList.add(plugin);
+            pluginHash.put(plugin.getName(), plugin);
+            return plugin;
+        }
+
+        public PluginNode[] orderedPlugins() throws CyclicDependencyException {
+            addDependencies();
+
+            while (numPlugins > 0) {
+                int currentPlugin = noSuccessors();
+                if (-1 == currentPlugin) {
+                    throw new CyclicDependencyException();
+                }
+                sortedPlugins[numPlugins - 1] = pluginList.get(currentPlugin);
+                deletePlugin(currentPlugin);
+            }
+
+            return sortedPlugins;
+        }
+
+        private void addDependencies() {
+            // Initialise our Topological sorting matrix
+            numPlugins = pluginList.size();
+            sortedPlugins = new PluginNode[numPlugins];
+            matrix = new int[numPlugins][numPlugins];
+            for (int i = 0; i < numPlugins; i++) {
+                for (int k = 0; k < numPlugins; k++) {
+                    matrix[i][k] = 0;
+                }
+            }
+
+            // Remove plugins with missing hard dependencies
+            for (PluginNode plugin: pluginList) {
+                for (String dependencyName : plugin.getDepend()) {
+                    PluginNode dependency = pluginHash.get(dependencyName);
+                    if (null == dependency) {
+                        // Missing dependency, cant load this plugin so remove it
+                        server.getLogger().log(Level.SEVERE, "Could not load '" + plugin.getFile().getPath() + "' in folder '" + directory.getPath() + "': Missing dependency '" + dependencyName + "'");
+                        pluginList.remove(plugin.getInitialIndex());
+                    }
+                }
+            }
+
+            // Add all dependencies
+            for (PluginNode plugin: pluginList) {
+                // Hard Dependencies
+                int idx = plugin.getInitialIndex();
+                for (String dependencyName : plugin.getDepend()) {
+                    matrix[pluginHash.get(dependencyName).getInitialIndex()][idx] = 1;
+                }
+                // Soft Dependencies
+                for (String dependencyName : plugin.getSoftDepend()) {
+                    PluginNode dependency = pluginHash.get(dependencyName);
+                    if (null != dependency) {
+                        // Dependency was found add it
+                        matrix[dependency.getInitialIndex()][idx] = 1;
+                    }
+                }
+            }
+        }
+
+        private int noSuccessors() {
+            boolean isEdge;
+            for (int row = 0; row < numPlugins; row++) {
+                isEdge = false;
+                for (int col = 0; col < numPlugins; col++) {
+                    if (0 < matrix[row][col]) {
+                        isEdge = true;
+                        break;
+                    }
+                }
+                if (!isEdge) {
+                    return row;
+                }
+            }
+            return -1; // cycle detected
+        }
+
+        private void deletePlugin(int delPlugin) {
+            if (delPlugin != numPlugins - 1) {
+                for (int j = delPlugin; j < numPlugins - 1; j++) {
+                    pluginList.set(j, pluginList.get(j + 1));
+                }
+
+                for (int row = delPlugin; row < numPlugins - 1; row++) {
+                    moveRowUp(row, numPlugins);
+                }
+
+                for (int col = delPlugin; col < numPlugins - 1; col++) {
+                    moveColLeft(col, numPlugins - 1);
+                }
+            }
+            numPlugins--;
+        }
+
+        private void moveRowUp(int row, int length) {
+            for (int col = 0; col < length; col++) {
+                matrix[row][col] = matrix[row + 1][col];
+            }
+        }
+
+        private void moveColLeft(int col, int length) {
+            for (int row = 0; row < length; row++) {
+                matrix[row][col] = matrix[row][col + 1];
+            }
+        }
     }
 }

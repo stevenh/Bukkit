@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.FileOutputStream;
 import java.lang.reflect.Constructor;
 import java.net.URL;
 import java.util.HashMap;
@@ -12,8 +13,17 @@ import java.util.Set;
 import java.util.ArrayList;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.jar.JarOutputStream;
 import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
+import java.util.Iterator;
+import java.util.jar.Attributes;
+import java.util.jar.Attributes.Name;
+import java.util.jar.Manifest;
+import java.util.StringTokenizer;
+import java.util.Enumeration;
+
 import org.bukkit.Server;
 import org.bukkit.event.CustomEventListener;
 import org.bukkit.event.Event;
@@ -29,6 +39,7 @@ import org.bukkit.event.weather.*;
 import org.bukkit.plugin.*;
 import org.yaml.snakeyaml.error.YAMLException;
 
+
 /**
  * Represents a Java plugin loader, allowing plugins in the form of .jar
  */
@@ -37,44 +48,20 @@ public final class JavaPluginLoader implements PluginLoader {
     private final Pattern[] fileFilters = new Pattern[] {
         Pattern.compile("\\.jar$"),
     };
-    private final Map<String, Class<?>> classes = new HashMap<String, Class<?>>();
-    private final Map<String, PluginClassLoader> loaders = new HashMap<String, PluginClassLoader>();
+    private final PluginClassLoader pluginLoader;
 
     public JavaPluginLoader(Server instance) {
         server = instance;
+        pluginLoader = new PluginClassLoader();
     }
 
     public Plugin loadPlugin(File file) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
-        return loadPlugin(file, false);
+        return loadPlugin(file, true);
     }
 
-    public Plugin loadPlugin(File file, boolean ignoreSoftDependencies) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
+    public Plugin loadPlugin(File file, boolean checkDependencies) throws InvalidPluginException, InvalidDescriptionException, UnknownDependencyException {
         JavaPlugin result = null;
-        PluginDescriptionFile description = null;
-
-        if (!file.exists()) {
-            throw new InvalidPluginException(new FileNotFoundException(String.format("%s does not exist", file.getPath())));
-        }
-        try {
-            JarFile jar = new JarFile(file);
-            JarEntry entry = jar.getJarEntry("plugin.yml");
-
-            if (entry == null) {
-                throw new InvalidPluginException(new FileNotFoundException("Jar does not contain plugin.yml"));
-            }
-
-            InputStream stream = jar.getInputStream(entry);
-
-            description = new PluginDescriptionFile(stream);
-
-            stream.close();
-            jar.close();
-        } catch (IOException ex) {
-            throw new InvalidPluginException(ex);
-        } catch (YAMLException ex) {
-            throw new InvalidPluginException(ex);
-        }
-
+        PluginDescriptionFile description = getPluginDescription(file);
         File dataFolder = new File(file.getParentFile(), description.getName());
         File oldDataFolder = getDataFolder(file);
 
@@ -111,74 +98,148 @@ public final class JavaPluginLoader implements PluginLoader {
             )));
         }
 
-        ArrayList<String> depend;
+        if (checkDependencies) {
+            PluginManager pm = server.getPluginManager();
+            for (String pluginName : description.getDepend()) {
+                if (null == pm.getPlugin(pluginName)) {
+                    throw new UnknownDependencyException(pluginName);
+                }
+            }
+        }
 
         try {
-            depend = (ArrayList) description.getDepend();
-            if (depend == null) {
-                depend = new ArrayList<String>();
-            }
-        } catch (ClassCastException ex) {
-            throw new InvalidPluginException(ex);
-        }
 
-        for (String pluginName : depend) {
-            if (loaders == null) {
-                throw new UnknownDependencyException(pluginName);
-            }
-            PluginClassLoader current = loaders.get(pluginName);
-
-            if (current == null) {
-                throw new UnknownDependencyException(pluginName);
-            }
-        }
-
-        if (!ignoreSoftDependencies) {
-            ArrayList<String> softDepend;
-
-            try {
-                softDepend = (ArrayList) description.getSoftDepend();
-                if (softDepend == null) {
-                    softDepend = new ArrayList<String>();
-                }
-            } catch (ClassCastException ex) {
-                throw new InvalidPluginException(ex);
-            }
-
-            for (String pluginName : softDepend) {
-                if (loaders == null) {
-                    throw new UnknownSoftDependencyException(pluginName);
-                }
-                PluginClassLoader current = loaders.get(pluginName);
-
-                if (current == null) {
-                    throw new UnknownSoftDependencyException(pluginName);
-                }
-            }
-        }
-
-        PluginClassLoader loader = null;
-
-        try {
-            URL[] urls = new URL[1];
-
-            urls[0] = file.toURI().toURL();
-            loader = new PluginClassLoader(this, urls, getClass().getClassLoader());
+            ClassLoader loader = pluginLoader.getLoader(description.getName(), file.toURI().toURL());
             Class<?> jarClass = Class.forName(description.getMain(), true, loader);
             Class<? extends JavaPlugin> plugin = jarClass.asSubclass(JavaPlugin.class);
-
             Constructor<? extends JavaPlugin> constructor = plugin.getConstructor();
-
             result = constructor.newInstance();
 
             result.initialize(this, server, description, dataFolder, file, loader);
         } catch (Throwable ex) {
             throw new InvalidPluginException(ex);
         }
+        return (Plugin)result;
+    }
 
-        loaders.put(description.getName(), (PluginClassLoader) loader);
+    public PluginDescriptionFile getPluginDescription(File file) throws InvalidPluginException, InvalidDescriptionException {
+        if (!file.exists()) {
+            throw new InvalidPluginException(new FileNotFoundException(String.format("%s does not exist", file.getPath())));
+        }
 
-        return (Plugin) result;
+        try {
+            JarFile jar = new JarFile(file);
+            JarEntry entry = jar.getJarEntry("plugin.yml");
+
+            if (entry == null) {
+                throw new InvalidPluginException(new FileNotFoundException("Jar does not contain plugin.yml"));
+            }
+
+            InputStream stream = jar.getInputStream(entry);
+            PluginDescriptionFile description = new PluginDescriptionFile(stream);
+
+            stream.close();
+            jar.close();
+
+            return description;
+
+        } catch (IOException ex) {
+            throw new InvalidPluginException(ex);
+        } catch (YAMLException ex) {
+            throw new InvalidPluginException(ex);
+        }
+    }
+
+    private void fixJarClassPath(PluginDescriptionFile description, File file) throws InvalidPluginException, IOException {
+        JarFile jar = new JarFile(file);
+        File oldFile = null;
+        File tmpFile = null;
+        try {
+            Manifest manifest = jar.getManifest();
+            Attributes attribs = manifest.getMainAttributes();
+            String cp = attribs.getValue(Name.CLASS_PATH);
+
+            if (null == cp || 0 == cp.trim().length()) {
+                return; // No Class-Path so its valid
+            }
+
+            // Look for local entries
+            StringTokenizer st = new StringTokenizer(cp.trim());
+            ArrayList<String> cpElements = new ArrayList();
+            StringBuffer validEntries = new StringBuffer();
+            StringBuffer invalidEntries = new StringBuffer();
+            String invalidSeperator = "";
+            String validSeperator = "";
+            while (st.hasMoreTokens()) {
+                String path = st.nextToken();
+                if (-1 == path.indexOf("/")) { // Note: This should not be platform dependent
+                    invalidEntries.append(invalidSeperator).append(path);
+                    invalidSeperator = " ";
+                } else {
+                    validEntries.append(validSeperator).append(path);
+                    validSeperator = " ";
+                }
+            }
+
+            if (0 == invalidEntries.length()) {
+                return; // Class-Path was valid
+            }
+
+            // Class-Path contained invalid entries, try to fix it
+            // Report the error to the log / console
+            ArrayList<String> authors = description.getAuthors();
+            Logger logger = server.getLogger();
+            logger.log(Level.SEVERE, String.format("Nag author(s): %s of '%s' about the following:", (0 < authors.size()) ? authors.toString() : "<NoAuthorGiven>", description.getName()));
+            logger.log(Level.SEVERE, "Invalid Class-Path in manifest (It contains plugin's)");
+            logger.log(Level.SEVERE, "Class-Path is: '" + invalidEntries.toString() + "'");
+            logger.log(Level.SEVERE, "Class-Path should be: '" + validEntries.toString() + "'");
+
+            // Fix the plugin by replacing the current jar with one created from a copy with the invalid Class-Path entires removed
+            attribs.put(Name.CLASS_PATH, validEntries.toString());
+            tmpFile = File.createTempFile("plugin", ".tmpjar", file.getParentFile());
+            JarOutputStream tempJar = new JarOutputStream(new FileOutputStream(tmpFile), manifest);
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+
+            for (Enumeration entries = jar.entries(); entries.hasMoreElements();) {
+                JarEntry entry = (JarEntry)entries.nextElement();
+                if (entry.getName().equalsIgnoreCase("META-INF/MANIFEST.MF")) {
+                    continue;
+                }
+                InputStream entryStream = jar.getInputStream(entry);
+                tempJar.putNextEntry(entry);
+
+                while (-1 != (bytesRead = entryStream.read(buffer))) {
+                    tempJar.write(buffer, 0, bytesRead);
+                }
+            }
+
+            jar.close();
+            tempJar.close();
+
+            // Replace the old jar with the fixed one
+            oldFile = File.createTempFile(file.getName(), ".old", file.getParentFile());
+            oldFile.delete();
+            if (!file.renameTo(oldFile)) {
+                throw new IOException("Failed to fix class path (initial rename failed)");
+            }
+
+            if (!tmpFile.renameTo(file)) {
+                oldFile.renameTo(file); // Might not work but at least try
+                throw new IOException("Failed to fix class path (fixed rename failed)");
+            }
+        } finally {
+            // Cleanup
+            if (null != jar) {
+                jar.close();
+            }
+            if (null != oldFile) {
+                oldFile.delete();
+            }
+            if (null != tmpFile) {
+                tmpFile.delete();
+            }
+        }
     }
 
     private File getDataFolder(File file) {
@@ -203,32 +264,6 @@ public final class JavaPluginLoader implements PluginLoader {
 
     public Pattern[] getPluginFileFilters() {
         return fileFilters;
-    }
-
-    public Class<?> getClassByName(final String name) {
-        Class<?> cachedClass = classes.get(name);
-
-        if (cachedClass != null) {
-            return cachedClass;
-        } else {
-            for (String current : loaders.keySet()) {
-                PluginClassLoader loader = loaders.get(current);
-
-                try {
-                    cachedClass = loader.findClass(name, false);
-                } catch (ClassNotFoundException cnfe) {}
-                if (cachedClass != null) {
-                    return cachedClass;
-                }
-            }
-        }
-        return null;
-    }
-
-    public void setClass(final String name, final Class<?> clazz) {
-        if (!classes.containsKey(name)) {
-            classes.put(name, clazz);
-        }
     }
 
     public EventExecutor createExecutor(Event.Type type, Listener listener) {
@@ -742,10 +777,6 @@ public final class JavaPluginLoader implements PluginLoader {
 
             String pluginName = jPlugin.getDescription().getName();
 
-            if (!loaders.containsKey(pluginName)) {
-                loaders.put(pluginName, (PluginClassLoader) jPlugin.getClassLoader());
-            }
-
             try {
                 jPlugin.setEnabled(true);
             } catch (Throwable ex) {
@@ -775,16 +806,7 @@ public final class JavaPluginLoader implements PluginLoader {
 
             server.getPluginManager().callEvent(new PluginDisableEvent(plugin));
 
-            loaders.remove(jPlugin.getDescription().getName());
-
-            if (cloader instanceof PluginClassLoader) {
-                PluginClassLoader loader = (PluginClassLoader) cloader;
-                Set<String> names = loader.getClasses();
-
-                for (String name : names) {
-                    classes.remove(name);
-                }
-            }
+            pluginLoader.removeLoader(jPlugin.getDescription().getName());
         }
     }
 }

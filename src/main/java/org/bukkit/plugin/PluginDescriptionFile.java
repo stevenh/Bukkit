@@ -3,6 +3,7 @@ package org.bukkit.plugin;
 import java.io.InputStream;
 import java.io.Reader;
 import java.io.Writer;
+import java.util.List;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -16,8 +17,8 @@ public final class PluginDescriptionFile {
     private static final Yaml yaml = new Yaml(new SafeConstructor());
     private String name = null;
     private String main = null;
-    private ArrayList<String> depend = null;
-    private ArrayList<String> softDepend = null;
+    private ArrayList<String> depend = new ArrayList<String>();
+    private ArrayList<String> softDepend = new ArrayList<String>();
     private String version = null;
     private Object commands = null;
     private String description = null;
@@ -100,11 +101,11 @@ public final class PluginDescriptionFile {
         return commands;
     }
 
-    public Object getDepend() {
+    public List<String> getDepend() {
         return depend;
     }
 
-    public Object getSoftDepend() {
+    public List<String> getSoftDepend() {
         return softDepend;
     }
 
@@ -245,10 +246,10 @@ public final class PluginDescriptionFile {
         if (commands != null) {
             map.put("command", commands);
         }
-        if (depend != null) {
+        if (depend != null && 0 != depend.size()) {
             map.put("depend", depend);
         }
-        if (softDepend != null) {
+        if (softDepend != null && 0 != softDepend.size()) {
             map.put("softdepend", softDepend);
         }
         if (website != null) {
